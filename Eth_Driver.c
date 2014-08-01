@@ -42,6 +42,8 @@
 #include <linux/kernel.h>			// Uses the kernel functions.
 #include <linux/skbuff.h>			// Packet manipulations.
 #include <linux/etherdevice.h>		// For the device.
+#include <linux/ip.h>
+#include <linux/tcp.h>
 
 /* Length definitions */
 #define mac_addr_len                    6
@@ -55,6 +57,7 @@ void Eth_teardown_pool (struct net_device* dev);
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev);
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev);
 void Eth_teardown_pool (struct net_device* dev);
+static void Eth_hw_tx(char *buf, int len, struct net_device *dev);
 
 /* priv structure that holds the informations about the device. */
 struct eth_priv {
@@ -296,87 +299,104 @@ void Eth_teardown_pool (struct net_device* dev) {
          }
 }
 
+/* Structure to manage the pool buffer */
+struct eth_packet *Eth_get_tx_buffer(struct net_device *dev) {
+	struct eth_priv *priv = netdev_priv(dev);
+	unsigned long flags = 0;
+	spinlock_t *lock = &priv->lock;
+	struct eth_packet *pkt;
+
+	spin_lock_irqsave(lock, flags);
+	pkt = priv->ppool;
+	priv->ppool = pkt->next;
+	if (priv->ppool == NULL) {
+		printk(KERN_INFO "Pool empty\n");
+		netif_stop_queue(dev);
+	}
+	spin_unlock_irqrestore(lock, flags);
+	return pkt;
+} 
+
 /*
 * Transmit a packet (low level interface)
 */
-	// static void Eth_hw_tx(char *buf, int len, struct net_device *dev) {
-	//  	/*
-	//   	 * This function deals with hw details. This interface loops
-	// 	 * back the packet to the other snull interface (if any).
-	// 	 * In other words, this function implements the snull behaviour,
-	// 	 * while all other procedures are rather device-independent
-	// 	 */
-	// 	struct iphdr *ih;
-	// 	struct net_device *dest;
-	// 	struct snull_priv *priv;
-	// 	u32 *saddr, *daddr;
-	// 	struct Eth_packet *tx_buffer;
+static void Eth_hw_tx(char *buf, int len, struct net_device *dev) {
+	/*
+	 * This function deals with hw details. This interface loops
+	 * back the packet to the other snull interface (if any).
+	 * In other words, this function implements the snull behaviour,
+	 * while all other procedures are rather device-independent		 */
+	struct iphdr *ih;
+	struct net_device *dest;
+	struct snull_priv *priv;
+	u32 *saddr, *daddr;
+	struct eth_packet *tx_buffer;
 
-	// 	/* I am paranoid. Ain't I? */
-	// 	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-	// 		printk("Eth: Hmm... packet too short (%i octets)\n", len);
-	// 		return;
-	// 	}
+	/* I am paranoid. Ain't I? */
+	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
+		printk("Eth: Hmm... packet too short (%i octets)\n", len);
+		return;
+	}
 
-	// 	if (0) { /* enable this conditional to look at the data */
-	// 	int i;
-	// 	PDEBUG("len is %i\n" KERN_DEBUG "data:",len);
-	// 	for (i=14 ; i<len; i++)
-	// 		printk(" %02x",buf[i]&0xff);
-	// 	printk("\n");
-	// 	}
-	// 	/*
-	// 	 * Ethhdr is 14 bytes, but the kernel arranges for iphdr
-	// 	 * to be aligned (i.e., ethhdr is unaligned)
-	// 	 */
-	// 	ih = (struct iphdr *)(buf+sizeof(struct ethhdr));
-	// 	saddr = &ih->saddr;
-	// 	daddr = &ih->daddr;
+	if (0) { /* enable this conditional to look at the data */
+		int i;
+		printk(KERN_DEBUG "len is %i\ndata:", len);
+		for (i=14 ; i<len; i++)
+			printk(" %02x",buf[i]&0xff);
+		printk("\n");
+	}
+	/*
+	 * Ethhdr is 14 bytes, but the kernel arranges for iphdr
+	 * to be aligned (i.e., ethhdr is unaligned)
+	 */
+	ih = (struct iphdr *)(buf+sizeof(struct ethhdr));
+	saddr = &ih->saddr;
+	daddr = &ih->daddr;
 
-	// 	((u8 *)saddr)[2] ^= 1; /* change the third octet (class C) */
-	// 	((u8 *)daddr)[2] ^= 1;
+	((u8 *)saddr)[2] ^= 1; /* change the third octet (class C) */
+	((u8 *)daddr)[2] ^= 1;
 
-	// 	ih->check = 0; /* and rebuild the checksum (ip needs it) */
-	// 	ih->check = ip_fast_csum((unsigned char *)ih,ih->ihl);
+	ih->check = 0; /* and rebuild the checksum (ip needs it) */
+	ih->check = ip_fast_csum((unsigned char *)ih,ih->ihl);
 
-	// 	if (dev == Eth_dev)
-	// 	PDEBUGG("%08x:%05i --> %08x:%05i\n",
-	// 	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source),
-	// 	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest));
-	// 	else
-	// 	PDEBUGG("%08x:%05i <-- %08x:%05i\n",
-	// 	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest),
-	// 	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source));
+	if (dev == device)
+	printk(KERN_DEBUG "%08x:%05i --> %08x:%05i\n",
+	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source),
+	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest));
+	else
+	printk(KERN_DEBUG"%08x:%05i <-- %08x:%05i\n",
+	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest),
+	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source));
 
-	// 	/*
-	// 	 * Ok, now the packet is ready for transmission: first simulate a
-	// 	 * receive interrupt on the twin device, then a
-	// 	 * transmission-done on the transmitting device
-	// 	 */
-	// 	dest = Eth_dev;
-	// 	priv = netdev_priv(dest);
-	// 	tx_buffer = snull_get_tx_buffer(dev);
-	// 	tx_buffer->datalen = len;
-	// 	memcpy(tx_buffer->data, buf, len);
-	// 	snull_enqueue_buf(dest, tx_buffer);
-	// 	if (priv->rx_int_enabled) {
-	// 		priv->status |= Eth_RX_INTR;
-	// 		snull_interrupt(0, dest, NULL);
-	// 	}
+	/*
+	 * Ok, now the packet is ready for transmission: first simulate a
+	 * receive interrupt on the twin device, then a
+	 * transmission-done on the transmitting device
+	 */
+	dest = device;
+	priv = netdev_priv(dest);
+	tx_buffer = Eth_get_tx_buffer(dev);
+	tx_buffer->datalen = len;
+	memcpy(tx_buffer->data, buf, len);
+	snull_enqueue_buf(dest, tx_buffer);
+	if (priv->rx_int_enabled) {
+		priv->status |= Eth_RX_INTR;
+		snull_interrupt(0, dest, NULL);
+	}
 
-	// 	priv = netdev_priv(dev);
-	// 	priv->tx_packetlen = len;
-	// 	priv->tx_packetdata = buf;
-	// 	priv->status |= SNULL_TX_INTR;
-	// 	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
-	//          	/* Simulate a dropped transmit interrupt */
-	// 		netif_stop_queue(dev);
-	// 		PDEBUG("Simulate lockup at %ld, txp %ld\n", jiffies,
-	// 		(unsigned long) priv->stats.tx_packets);
-	// 	}
-	// 	else
-	// 		snull_interrupt(0, dev, NULL);
-	// }
+	priv = netdev_priv(dev);
+	priv->tx_packetlen = len;
+	priv->tx_packetdata = buf;
+	priv->status |< SNULL_TX_INTR;
+	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
+	    /* Simulate a dropped transmit interrupt */
+		netif_stop_queue(dev);
+		printk(KERN_DEBUG"Simulate lockup at %ld, txp %ld\n", jiffies,
+		(unsigned long) priv->stats.tx_packets);
+	}
+	else
+		snull_interrupt(0, dev, NULL);
+}
 
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev) {
 	int len;
@@ -481,5 +501,5 @@ module_init(Eth_driver_init);
 module_exit(Eth_driver_exit);
 
 MODULE_AUTHOR("Pavel Teixeira");
-MODULE_DESCRIPTION("NG Ethernet driver");
+MODULE_DESCRIPTION("Ethernet driver");
 MODULE_LICENSE("GPL v2");
