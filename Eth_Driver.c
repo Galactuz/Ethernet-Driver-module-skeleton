@@ -44,9 +44,14 @@
 #include <linux/etherdevice.h>		// For the device.
 #include <linux/ip.h>
 #include <linux/tcp.h>
+#include <linux/irqreturn.h>
 
 /* Length definitions */
 #define mac_addr_len                    6
+
+/* These are the flags in the statusword */
+#define ETH_RX_INTR 0x0001
+#define ETH_TX_INTR 0x0002
 
 /* net_device referencing */
 static struct net_device *device;
@@ -57,7 +62,6 @@ void Eth_teardown_pool (struct net_device* dev);
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev);
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev);
 void Eth_teardown_pool (struct net_device* dev);
-static void Eth_hw_tx(char *buf, int len, struct net_device *dev);
 
 /* priv structure that holds the informations about the device. */
 struct eth_priv {
@@ -290,13 +294,13 @@ static void __exit Eth_driver_exit(void)
 
 void Eth_teardown_pool (struct net_device* dev) {
 	struct eth_priv *priv = netdev_priv(dev);
-        struct eth_packet *pkt;
+    struct eth_packet *pkt;
 
-        while ((pkt = priv->ppool)) {
+    while ((pkt = priv->ppool)) {
 		priv->ppool = pkt->next;
-                kfree (pkt);
-                /* FIXME - in-flight packets ? */
-         }
+        kfree (pkt);
+       /* FIXME - in-flight packets ? */
+    }
 }
 
 /* Structure to manage the pool buffer */
@@ -320,83 +324,7 @@ struct eth_packet *Eth_get_tx_buffer(struct net_device *dev) {
 /*
 * Transmit a packet (low level interface)
 */
-static void Eth_hw_tx(char *buf, int len, struct net_device *dev) {
-	/*
-	 * This function deals with hw details. This interface loops
-	 * back the packet to the other snull interface (if any).
-	 * In other words, this function implements the snull behaviour,
-	 * while all other procedures are rather device-independent		 */
-	struct iphdr *ih;
-	struct net_device *dest;
-	struct snull_priv *priv;
-	u32 *saddr, *daddr;
-	struct eth_packet *tx_buffer;
 
-	/* I am paranoid. Ain't I? */
-	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
-		printk("Eth: Hmm... packet too short (%i octets)\n", len);
-		return;
-	}
-
-	if (0) { /* enable this conditional to look at the data */
-		int i;
-		printk(KERN_DEBUG "len is %i\ndata:", len);
-		for (i=14 ; i<len; i++)
-			printk(" %02x",buf[i]&0xff);
-		printk("\n");
-	}
-	/*
-	 * Ethhdr is 14 bytes, but the kernel arranges for iphdr
-	 * to be aligned (i.e., ethhdr is unaligned)
-	 */
-	ih = (struct iphdr *)(buf+sizeof(struct ethhdr));
-	saddr = &ih->saddr;
-	daddr = &ih->daddr;
-
-	((u8 *)saddr)[2] ^= 1; /* change the third octet (class C) */
-	((u8 *)daddr)[2] ^= 1;
-
-	ih->check = 0; /* and rebuild the checksum (ip needs it) */
-	ih->check = ip_fast_csum((unsigned char *)ih,ih->ihl);
-
-	if (dev == device)
-	printk(KERN_DEBUG "%08x:%05i --> %08x:%05i\n",
-	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source),
-	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest));
-	else
-	printk(KERN_DEBUG"%08x:%05i <-- %08x:%05i\n",
-	ntohl(ih->daddr),ntohs(((struct tcphdr *)(ih+1))->dest),
-	ntohl(ih->saddr),ntohs(((struct tcphdr *)(ih+1))->source));
-
-	/*
-	 * Ok, now the packet is ready for transmission: first simulate a
-	 * receive interrupt on the twin device, then a
-	 * transmission-done on the transmitting device
-	 */
-	dest = device;
-	priv = netdev_priv(dest);
-	tx_buffer = Eth_get_tx_buffer(dev);
-	tx_buffer->datalen = len;
-	memcpy(tx_buffer->data, buf, len);
-	snull_enqueue_buf(dest, tx_buffer);
-	if (priv->rx_int_enabled) {
-		priv->status |= Eth_RX_INTR;
-		snull_interrupt(0, dest, NULL);
-	}
-
-	priv = netdev_priv(dev);
-	priv->tx_packetlen = len;
-	priv->tx_packetdata = buf;
-	priv->status |< SNULL_TX_INTR;
-	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
-	    /* Simulate a dropped transmit interrupt */
-		netif_stop_queue(dev);
-		printk(KERN_DEBUG"Simulate lockup at %ld, txp %ld\n", jiffies,
-		(unsigned long) priv->stats.tx_packets);
-	}
-	else
-		snull_interrupt(0, dev, NULL);
-}
 
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev) {
 	int len;
@@ -453,49 +381,6 @@ void Eth_rx(struct net_device *dev, struct eth_packet *pkt) {
 }
 
 
-/**
-150  * eth_type_trans - determine the packet's protocol ID.
-151  * @skb: received socket data
-152  * @dev: receiving network device
-153  *
-154  * The rule here is that we
-155  * assume 802.3 if the type field is short enough to be a length.
-156  * This is normal practice and works for any 'now in use' protocol.
-157  */
-__be16 Eth_type_trans(struct sk_buff *skb, struct net_device *dev) {
-	struct ethhdr* eth;
-	unsigned short _service_access_point;
-	const unsigned short *sap;
-
-	skb->dev = dev;
-	skb_reset_mac_header(skb);
-	skb_pull_inline(skb, ETH_HLEN);
-	eth = eth_hdr(skb);
-
-	 if (unlikely(is_multicast_ether_addr(eth->h_dest))) {
-         	if (ether_addr_equal_64bits(eth->h_dest, dev->broadcast))
-			skb->pkt_type = PACKET_BROADCAST;
-		else
-			skb->pkt_type = PACKET_MULTICAST;
-	}
-
-	else if (unlikely(!ether_addr_equal_64bits(eth->h_dest, dev->dev_addr)))
-        	skb->pkt_type = PACKET_OTHERHOST;
-
-	if (unlikely(netdev_uses_dsa_tags(dev)))
-		return htons(ETH_P_DSA);
-	if (unlikely(netdev_uses_trailer_tags(dev)))
-		return htons(ETH_P_TRAILER);
-
-	if (likely(ntohs(eth->h_proto) >= 1536))
-		return eth->h_proto;
-
-	sap = skb_header_pointer(skb, 0, sizeof(*sap), &_service_access_point);
-	if (sap && *sap == 0xFFFF)
-		return htons(ETH_P_802_3);
-
-	return htons(ETH_P_802_3);
-}
 
 module_init(Eth_driver_init);
 module_exit(Eth_driver_exit);
