@@ -48,6 +48,7 @@
 
 /* Length definitions */
 #define mac_addr_len                    6
+#define RX_POLL_WEIGHT					64
 
 /* These are the flags in the statusword */
 #define ETH_RX_INTR 0x0001
@@ -62,6 +63,13 @@ void Eth_teardown_pool (struct net_device* dev);
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev);
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev);
 void Eth_teardown_pool (struct net_device* dev);
+static int Eth_napi_struct_poll(struct napi_struct *napi, int budget);
+/* Ading the NAPI interruption structure
+ * to the code so the driver can handle
+ * the high velocity transmission and 
+ * packages.
+ */	
+static struct napi_struct Eth_napi_struct;
 
 /* priv structure that holds the informations about the device. */
 struct eth_priv {
@@ -267,7 +275,11 @@ static int __init Eth_driver_init(void)
 	int result;
 	pr_info("Loading Ethernet network module:....");
 
-	/* Allocating each net device. */
+	/* Add NAPI structure to the device. */
+    /* We just use the only netdevice for implementing polling. */
+    netif_napi_add(device, &Eth_napi_struct, Eth_napi_struct_poll, RX_POLL_WEIGHT);
+
+	/* Allocating the net device. */
 	device = alloc_netdev(0, "Eth%d", Eth_setup);
 
 	if ((result = register_netdev(device))) {
@@ -380,6 +392,103 @@ void Eth_rx(struct net_device *dev, struct eth_packet *pkt) {
 		return;
 }
 
+void eth_release_buffer(struct eth_packet *pkt) {
+	unsigned long flags;
+	struct eth_priv *priv = netdev_priv(pkt->dev);
+
+	spin_lock_irqsave(&priv->lock, flags);
+	pkt->next = priv->ppool;
+	priv->ppool = pkt;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	if(netif_queue_stopped(pkt->dev) && pkt->next == NULL)
+		netif_wake_queue(pkt->dev);
+}
+
+static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs) {
+	int statusword;
+	struct eth_priv *priv;
+	struct eth_packet *pkt = NULL;
+
+	/*
+	 * As usual, check the "device" pointer to be sure it is
+	 * really interrupting.
+	 * Then assign "struct device *dev".
+	 */
+	 struct net_device *dev = (struct net_device *)dev_id;
+	 /* ... and check with hw if it's really ours */
+
+	 /* paranoid */
+	 if(!dev)
+	 	return;
+
+	/* Lock the device */
+	priv = netdev_priv(dev);
+	spin_lock(&priv->lock);
+
+	/* retrieve statusword: real netdevices use I/O instructions */
+	statusword = priv->status;
+	priv->status = 0;
+	if(statusword & ETH_RX_INTR) {
+		/* Send it to Eth_rx for handling */
+		pkt = priv->rx_queue;
+		if(pkt) {
+			priv->rx_queue = pkt->next;
+			Eth_rx(dev, pkt);
+		}
+	}
+	if (statusword & ETH_TX_INTR) {
+		/* a transmission is over: free the skb */
+		priv->stats.tx_packets++;
+		priv->stats.tx_bytes += priv->tx_packetlen;
+		dev_kfree_skb(priv->skb);
+	}
+
+	/* Unlock the device and we are done */
+	spin_unlock(&priv->lock);
+	if (pkt)
+		eth_release_buffer(pkt); /* Do this outside the lock! */
+		return IRQ_HANDLED;
+}
+
+static int Eth_napi_struct_poll (struct napi_struct *napi, int budget) {
+	int npackets = 0, quota = min(napi->quota, *budget);
+	struct sk_buff *skb;
+	struct eth_priv *priv = netdev_priv(napi);
+	struct eth_packet *pkt;
+
+	while (npackets < quota && priv->rx_queue) {
+		pkt = eth_dequeue_buf(napi);
+		skb = dev_alloc_skb(pkt->datalen + 2);
+		if(!skb) {
+			if (printk_ratelimit())
+				printk(KERN_NOTICE "Eth: packet dropped\n");
+			priv->stats.rx_dropped++;
+			eth_release_buffer(pkt);
+			continue;
+		}
+		memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
+		skb->dev = napi;
+		skb->protocol = eth_type_trans(skb, napi);
+		skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it.*/
+		netif_receive_skb(skb);
+
+		/* Maintain stats */
+		npackets++;
+		priv->stats.rx_packets++;
+		priv->stats.rx_bytes += pkt->datalen;
+		eth_release_buffer(pkt);
+	}
+	/* If we processed all packets, we're done; tell the kernel and reenables ints */
+	*budget -= npackets;
+	napi->quota -= npackets;
+	if(!priv->rx_queue) {
+		netif_rx_complete(napi);
+		eth_rx_ints(dev, 1);
+		return 0;
+	}
+	/* We couldn't process everything */
+	return 1;
+}
 
 
 module_init(Eth_driver_init);
