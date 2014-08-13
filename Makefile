@@ -4,7 +4,7 @@
 
 obj-m += Eth_Driver.o
 
-export KROOT=/lib/modules/3.15.6-200.fc20.x86_64/build
+export KROOT=/lib/modules/$(shell uname -r)/build
 
 allofit:  modules
 modules:

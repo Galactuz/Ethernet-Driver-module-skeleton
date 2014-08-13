@@ -274,11 +274,12 @@ static void Eth_setup(struct net_device *dev)
 static int __init Eth_driver_init(void)
 {
 	int result;
+	struct eth_priv *priv;
 	pr_info("Loading Ethernet network module:....");
 
 	/* Add NAPI structure to the device. */
-    /* We just use the only netdevice for implementing polling. */
-    netif_napi_add(device, &Eth_napi_struct, Eth_napi_struct_poll, RX_POLL_WEIGHT);
+    	/* We just use the only netdevice for implementing polling. */
+    	netif_napi_add(device, &priv->napi, Eth_napi_struct_poll, RX_POLL_WEIGHT);
 
 	/* Allocating the net device. */
 	device = alloc_netdev(0, "Eth%d", Eth_setup);
@@ -297,7 +298,7 @@ static void __exit Eth_driver_exit(void)
 	pr_info("Unloading transmitting network module\n\n");
 	if (device) {
 		unregister_netdev(device);
-		netif_napi_del();
+		//netif_napi_del();		//Napi exit
 		printk(KERN_INFO "Device Unregistered...");
 		Eth_teardown_pool(device);
 		free_netdev(device);
@@ -441,8 +442,10 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 		 * the driver shortly to pick up all available packets.
 		 */
 		Eth_rx_ints(dev, 0);
-		if (napi_schedule_prep(dev))
-       		__napi_schedule(dev);
+		if (napi_schedule_prep(&priv->napi)) {
+		/* Disinable reception interrupts */
+       		__napi_schedule(&priv->napi);
+		}
 		
 	}
 	if (statusword & ETH_TX_INTR) {
@@ -459,45 +462,7 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 		return IRQ_HANDLED;
 }
 
-static int Eth_napi_struct_poll (struct napi_struct *napi, int budget) {
-	int npackets = 0, quota = min(napi->quota, *budget);
-	struct sk_buff *skb;
-	struct eth_priv *priv = netdev_priv(napi);
-	struct eth_packet *pkt;
-
-	while (npackets < quota && priv->rx_queue) {
-		pkt = eth_dequeue_buf(napi);
-		skb = dev_alloc_skb(pkt->datalen + 2);
-		if(!skb) {
-			if (printk_ratelimit())
-				printk(KERN_NOTICE "Eth: packet dropped\n");
-			priv->stats.rx_dropped++;
-			eth_release_buffer(pkt);
-			continue;
-		}
-		memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
-		skb->dev = napi;
-		skb->protocol = eth_type_trans(skb, napi);
-		skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it.*/
-		netif_receive_skb(skb);
-
-		/* Maintain stats */
-		npackets++;
-		priv->stats.rx_packets++;
-		priv->stats.rx_bytes += pkt->datalen;
-		eth_release_buffer(pkt);
-	}
-	/* If we processed all packets, we're done; tell the kernel and reenables ints */
-	*budget -= npackets;
-	napi->quota -= npackets;
-	if(!priv->rx_queue) {
-		netif_rx_complete(napi);
-		eth_rx_ints(dev, 1);
-		return 0;
-	}
-	/* We couldn't process everything */
-	return 1;
-}
+static int Eth_poll (struct napi_struct *napi, int budget);
 
 
 module_init(Eth_driver_init);
