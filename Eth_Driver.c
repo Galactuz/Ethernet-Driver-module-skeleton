@@ -74,6 +74,7 @@ static struct napi_struct Eth_napi_struct;
 /* priv structure that holds the informations about the device. */
 struct eth_priv {
 	struct net_device_stats stats;
+	struct napi_struct napi;
 	int status;
 	struct eth_packet* ppool;
 	struct eth_packet* rx_queue; /* List of incoming packets */
@@ -296,6 +297,7 @@ static void __exit Eth_driver_exit(void)
 	pr_info("Unloading transmitting network module\n\n");
 	if (device) {
 		unregister_netdev(device);
+		netif_napi_del();
 		printk(KERN_INFO "Device Unregistered...");
 		Eth_teardown_pool(device);
 		free_netdev(device);
@@ -404,6 +406,11 @@ void eth_release_buffer(struct eth_packet *pkt) {
 		netif_wake_queue(pkt->dev);
 }
 
+static void Eth_rx_ints(struct net_device *dev, int enable) {
+	struct eth_priv *priv = netdev_priv(dev);
+	priv->rx_int_enabled = enable;
+}
+
 static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs) {
 	int statusword;
 	struct eth_priv *priv;
@@ -414,7 +421,7 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 	 * really interrupting.
 	 * Then assign "struct device *dev".
 	 */
-	 struct net_device *dev = (struct net_device *)dev_id;
+	 struct net_device *dev = (struct net_device *)dev_instance;
 	 /* ... and check with hw if it's really ours */
 
 	 /* paranoid */
@@ -429,12 +436,14 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 	statusword = priv->status;
 	priv->status = 0;
 	if(statusword & ETH_RX_INTR) {
-		/* Send it to Eth_rx for handling */
-		pkt = priv->rx_queue;
-		if(pkt) {
-			priv->rx_queue = pkt->next;
-			Eth_rx(dev, pkt);
-		}
+		/* This will disinable any further "packet available" 
+		 * interrupts and tells networking subsystem to poll 
+		 * the driver shortly to pick up all available packets.
+		 */
+		Eth_rx_ints(dev, 0);
+		if (napi_schedule_prep(dev))
+       		__napi_schedule(dev);
+		
 	}
 	if (statusword & ETH_TX_INTR) {
 		/* a transmission is over: free the skb */
