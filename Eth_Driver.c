@@ -106,22 +106,6 @@ void printline(unsigned char *data, int n) {
 }
 
 /*
-* Deal with a transmit timeout.
-*/
-
-//void nf10_tx_timeout (struct net_device *dev) {
-//	struct nf10_priv *priv = netdev_priv(dev);
-//	PDEBUG("Transmit timeout at %ld, latency %ld\n", jiffies,
-//		jiffies - dev->trans_start);
-	/* Simulates a transmission interrupt to get things moving */
-//	priv->status = NF10_TX_INTR;
-//	nf10_interrupt(0, dev, NULL);
-//	priv->stats.tx_errors++;
-//	netif_wake_queue(dev);
-//	return;
-//}
-
-/*
  * Eth_do_ioctl allows the driver to have Input/Output commands.
  * Missing implementation
  */
@@ -365,6 +349,44 @@ int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev) {
 	return 0; /* Our simple device can not fail */
 }
 
+/*static int Eth_napi_struct_poll(struct napi_struct *napi, int brudget) {
+	int npackets = 0;
+	struct sk_buff *skb;
+	struct eth_priv *priv = container_of(napi, struct eth_priv, napi);
+	struct net_device *dev = priv->dev;
+	struct eth_packet *pkt;
+
+	while (npackets < budget && priv->rx_queue) {
+		pkt = eth_dequeue_buf(dev);
+		skb = dev_alloc_skb(pkt->datalen + 2);
+		if (!skb) {
+			if (printk_ratelimit)
+				printk(KERN_NOTICE "Eth: packet dropped\n");
+			priv->stats.rx_dropped++;
+			eth_release_buffer(pkt);
+			continue;
+		}
+		skb_reserve(skb, 2);  align IP on 16B boundary 
+		memcopy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
+		skb->dev = dev;
+		skb->protocol = eth_type_trans(skb, dev);
+		skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it */
+		//netif_receive_skb(skb);
+		/* Maintain stats */
+		//npackets++;
+		//priv->stats.rx_packets++;
+		//priv->stats.rx_bytes += pkt->datalen;
+		//eth_release_buffer(pkt);
+	//}
+	/* If we processed all packets, we're done; tell the kernel and re-enable ints */
+	//if (npackets < budget) {
+	//	napi_complete(napi);
+	//	Eth_rx_ints(dev, 1);
+	//}
+	//return npackets;
+//}*/
+
+
 void Eth_rx(struct net_device *dev, struct eth_packet *pkt) {
 	struct sk_buff *skb;
 	struct eth_priv * priv = netdev_priv(dev);
@@ -422,7 +444,7 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 	 * really interrupting.
 	 * Then assign "struct device *dev".
 	 */
-	 struct net_device *dev = (struct net_device *)dev_instance;
+	 struct net_device *dev = (struct net_device *)dev_id;
 	 /* ... and check with hw if it's really ours */
 
 	 /* paranoid */
@@ -443,8 +465,8 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 		 */
 		Eth_rx_ints(dev, 0);
 		if (napi_schedule_prep(&priv->napi)) {
-		/* Disinable reception interrupts */
-       		__napi_schedule(&priv->napi);
+			/* Disinable reception interrupts */
+       			__napi_schedule(&priv->napi);
 		}
 		
 	}
