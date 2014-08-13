@@ -64,6 +64,7 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev);
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev);
 void Eth_teardown_pool (struct net_device* dev);
 static int Eth_napi_struct_poll(struct napi_struct *napi, int budget);
+void Eth_tx_timeout(struct net_device *dev);
 /* Ading the NAPI interruption structure
  * to the code so the driver can handle
  * the high velocity transmission and 
@@ -190,13 +191,14 @@ static int Eth_close(struct net_device *dev)
  * Structure that holds all the options supported by the driver.
  */
 static struct net_device_ops ndo = {
-	.ndo_open = Eth_open,
-	.ndo_stop = Eth_close,
+	.ndo_open 		= Eth_open,
+	.ndo_stop 		= Eth_close,
 	.ndo_start_xmit = Eth_start_xmit,
-	.ndo_do_ioctl = Eth_do_ioctl,
-	.ndo_get_stats = Eth_get_stats,
+	.ndo_do_ioctl 	= Eth_do_ioctl,
+	.ndo_get_stats 	= Eth_get_stats,
 	.ndo_set_config = Eth_config,
 	.ndo_change_mtu = Eth_change_mtu,
+	.ndo_tx_timeout = Eth_tx_timeout,
 };
 
 int ng_header(struct sk_buff *skb, struct net_device *dev,
@@ -263,7 +265,7 @@ static int __init Eth_driver_init(void)
 
 	/* Add NAPI structure to the device. */
     	/* We just use the only netdevice for implementing polling. */
-    	netif_napi_add(device, &priv->napi, Eth_napi_struct_poll, RX_POLL_WEIGHT);
+    netif_napi_add(device, &priv->napi, Eth_napi_struct_poll, RX_POLL_WEIGHT);
 
 	/* Allocating the net device. */
 	device = alloc_netdev(0, "Eth%d", Eth_setup);
@@ -279,7 +281,7 @@ static int __init Eth_driver_init(void)
 
 static void __exit Eth_driver_exit(void)
 {
-	pr_info("Unloading transmitting network module\n\n");
+	printk(KERN_INFO "Unloading transmitting network module\n\n");
 	if (device) {
 		unregister_netdev(device);
 		//netif_napi_del();		//Napi exit
@@ -484,8 +486,20 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
 		return IRQ_HANDLED;
 }
 
-static int Eth_poll (struct napi_struct *napi, int budget);
+void Eth_tx_timeout(struct net_device *dev) {
+	struct eth_priv *priv = netdev_priv(dev);
 
+	//PDEBUG ("Transmit timeout at %ld, latency %ls'n", jiffies,
+	//			jiffies - dev->trans_start);
+	printk(KERN_DEBUG "Transmit timeout at %ld, latency %ls \n", jiffies, 
+				jiffies - dev->trans_start);
+	/* Simulate a transmission interrupt to get things moving */
+	priv->status = ETH_TX_INTR;
+	Eth_interruption(0, dev, NULL);
+	priv->stats.tx_errors++;
+	netif_wake_queue(dev);
+	return;
+}
 
 module_init(Eth_driver_init);
 module_exit(Eth_driver_exit);
