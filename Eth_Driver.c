@@ -48,11 +48,7 @@
  
 /* Length definitions */
 #define mac_addr_len                    6
-#define RX_POLL_WEIGHT                  64
  
-/* These are the flags in the statusword */
-#define ETH_RX_INTR 0x0001
-#define ETH_TX_INTR 0x0002
  
 /* net_device referencing */
 static struct net_device *device;
@@ -203,7 +199,15 @@ static struct net_device_ops ndo = {
     .ndo_set_config = Eth_config,
     .ndo_change_mtu = Eth_change_mtu,
     .ndo_tx_timeout = Eth_tx_timeout,
+    //.ndo_poll_controller = Eth_napi_struct_poll;
 };
+
+void Eth_netdev_init(struct net_device *netdev)
+{
+    ether_setup(netdev);
+    netdev->netdev_ops  = &ndo;
+    netdev->watchdog_timeo = 5 * HZ;
+}
  
 int ng_header(struct sk_buff *skb, struct net_device *dev,
                 unsigned short type, const void *daddr, const void *saddr,
@@ -271,7 +275,7 @@ static int __init Eth_driver_init(void)
  
     /* Add NAPI structure to the device. */
         /* We just use the only netdevice for implementing polling. */
-    //netif_napi_add(device, &priv->napi, Eth_napi_struct_poll, RX_POLL_WEIGHT);
+    //netif_napi_add(device, &priv->napi, Eth_napi_struct_poll, NAPI_POLL_WEIGHT);
  
     /* Allocating the net device. */
     device = alloc_netdev(0, "Eth%d", Eth_setup);
@@ -290,7 +294,7 @@ static void __exit Eth_driver_exit(void)
     printk(KERN_INFO "Unloading transmitting network module\n\n");
     if (device) {
         unregister_netdev(device);
-        //netif_napi_del();     //Napi exit
+        //netif_napi_del();     //Doesn't neet to use Napi exit because free_netdev() does that.
         printk(KERN_INFO "Device Unregistered...");
         Eth_teardown_pool(device);
         free_netdev(device);
@@ -329,10 +333,8 @@ struct eth_packet *Eth_get_tx_buffer(struct net_device *dev) {
 }
  
 /*
-* Transmit a packet (low level interface)
-*/
- 
- 
+ * Transmit a packet (low level interface)
+ */
 int Eth_start_xmit(struct sk_buff *skb, struct net_device *dev) {
     int len;
     char *data, shortpkt[ETH_ZLEN];
@@ -371,6 +373,10 @@ struct eth_packet *eth_dequeue_buf(struct net_device *dev) {
     return pkt;
 }
  
+
+ /**
+  * Eth_napi_struct_poll - NAPI Rx polling callback
+  **/
  static int Eth_napi_struct_poll(struct napi_struct *napi, int budget) {
     int npackets = 0;
     struct sk_buff *skb;
@@ -394,17 +400,20 @@ struct eth_packet *eth_dequeue_buf(struct net_device *dev) {
         skb->protocol = eth_type_trans(skb, dev);
         skb->ip_summed = CHECKSUM_UNNECESSARY; // don't check it
         netif_receive_skb(skb);
-        // Maintain stats
+        /* Maintain stats */
         npackets++;
         priv->stats.rx_packets++;
         priv->stats.rx_bytes += pkt->datalen;
         eth_release_buffer(pkt);
     }
-    //If we processed all packets, we're done; tell the kernel and re-enable ints
+    /* If we processed all packets, we're done; tell the kernel and re-enable interruptions */
+    /* If budget not fully consumed, exit the polling mode */
     if (npackets < budget) {
         napi_complete(napi);
+        /* Enabling the normal interruption */
         Eth_rx_ints(dev, 1);
     }
+
     return npackets;
 }
  
@@ -448,7 +457,7 @@ void eth_release_buffer(struct eth_packet *pkt) {
     priv->ppool = pkt;
     spin_unlock_irqrestore(&priv->lock, flags);
     if(netif_queue_stopped(pkt->dev) && pkt->next == NULL)
-        netif_wake_queue(pkt->dev);
+    netif_wake_queue(pkt->dev);
 }
  
 static void Eth_rx_ints(struct net_device *dev, int enable) {
@@ -480,6 +489,7 @@ static irqreturn_t Eth_interruption(int irq, void *dev_id, struct pt_regs *regs)
     /* retrieve statusword: real netdevices use I/O instructions */
     statusword = priv->status;
     priv->status = 0;
+
     if(statusword & ETH_RX_INTR) {
         /* This will disinable any further "packet available"
          * interrupts and tells networking subsystem to poll
@@ -520,6 +530,7 @@ void Eth_tx_timeout(struct net_device *dev) {
     netif_wake_queue(dev);
     return;
 }
+
  
 module_init(Eth_driver_init);
 module_exit(Eth_driver_exit);
